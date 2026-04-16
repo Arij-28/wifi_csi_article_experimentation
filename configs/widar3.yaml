@@ -1,0 +1,43 @@
+seed: 42
+num_workers: 0
+output_dir: runs
+
+dataset:
+  name: widar3
+  root: data/widar3
+  metadata_csv: data/widar3/metadata.csv
+  file_format: npy
+  signal_key: csi
+  input_shape: [3, 114, 500]
+  label_column: label
+  domain_column: domain
+  split_column: split
+
+protocol:
+  mode: leave_one_domain_out
+  leave_out_column: domain
+  leave_out_value: room_1
+  val_ratio: 0.2
+
+model:
+  embedding_dim: 128
+  hidden_dim: 128
+  dropout: 0.3
+  num_classes: 6
+
+training:
+  epochs: 40
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0001
+  early_stop_patience: 8
+  objective: proto_supcon_brier
+  lambda_proto: 0.2
+  lambda_supcon: 0.1
+  lambda_brier: 0.05
+  temperature: 0.1
+
+evaluation:
+  selective_prediction: true
+  tau_conf: 0.65
+  tau_dist: 3.0

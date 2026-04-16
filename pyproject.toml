@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wificsi-exp"
+version = "0.1.0"
+description = "Experimental codebase for Wi-Fi CSI HAR domain generalization"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+  {name = "Arij Azzabi"}
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
