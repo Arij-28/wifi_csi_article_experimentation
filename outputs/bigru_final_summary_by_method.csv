@@ -1,0 +1,5 @@
+,acc,acc,macro_f1,macro_f1,ece,ece,brier,brier,aurc,aurc,sel_acc_50,sel_acc_50,sel_acc_80,sel_acc_80
+,mean,std,mean,std,mean,std,mean,std,mean,std,mean,std,mean,std
+method,,,,,,,,,,,,,,
+BiGRU ERM,0.5812,0.1201,0.3206,0.063,0.275,0.1079,0.6748,0.2044,0.237,0.1137,0.7542,0.1313,0.6495,0.1333
+BiGRU+Proto(0.001),0.5849,0.116,0.3198,0.063,0.2495,0.1184,0.6553,0.2036,0.231,0.1097,0.7602,0.1332,0.6518,0.1275

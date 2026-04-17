@@ -1,0 +1,19 @@
+{
+  "summary_json": "outputs\\bigru_erm_user1_train-1_test-1_lp0_0_seed42_summary.json",
+  "checkpoint": "outputs\\bigru_erm_user1_train-1_test-1_lp0_0_seed42_best.pt",
+  "temperature": 2.4044811725616455,
+  "raw": {
+    "acc": 0.44909044972208184,
+    "macro_f1": 0.3839203760213914,
+    "ece": 0.4080142476767708,
+    "brier": 0.9238094091415405,
+    "aurc": 0.3760198467515104
+  },
+  "temp_scaled": {
+    "acc": 0.44909044972208184,
+    "macro_f1": 0.3839203760213914,
+    "ece": 0.18648907678138735,
+    "brier": 0.7526194453239441,
+    "aurc": 0.3744194607065445
+  }
+}

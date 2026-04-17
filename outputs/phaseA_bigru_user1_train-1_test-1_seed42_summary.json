@@ -1,0 +1,21 @@
+{
+  "device": "cpu",
+  "model_name": "bigru",
+  "user_test": 1,
+  "subset_train": -1,
+  "subset_test": -1,
+  "val_ratio": 0.1,
+  "batch_size": 64,
+  "epochs": 20,
+  "lr": 0.001,
+  "seed": 42,
+  "best_epoch": 15,
+  "best_test": {
+    "loss": 3.592068763981569,
+    "acc": 0.44909044972208184,
+    "macro_f1": 0.3839203760213914,
+    "ece": 0.4080142476767708,
+    "brier": 0.9238094091415405
+  },
+  "aurc": 0.3760198467515104
+}

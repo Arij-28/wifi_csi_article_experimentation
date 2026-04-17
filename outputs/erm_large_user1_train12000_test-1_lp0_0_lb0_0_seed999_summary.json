@@ -1,0 +1,25 @@
+{
+  "device": "cpu",
+  "user_test": 1,
+  "subset_train": 12000,
+  "subset_test": -1,
+  "val_ratio": 0.1,
+  "batch_size": 64,
+  "epochs": 15,
+  "lr": 0.001,
+  "lambda_proto": 0.0,
+  "lambda_brier": 0.0,
+  "seed": 999,
+  "best_epoch": 13,
+  "best_test": {
+    "loss": 3.5394682505927104,
+    "ce": 3.5394682505927104,
+    "proto": 0.0,
+    "brier_reg": 1.0744509856588855,
+    "acc": 0.2813289540171804,
+    "macro_f1": 0.19535553548069065,
+    "ece": 0.42257150670512567,
+    "brier": 1.074450969696045
+  },
+  "aurc": 0.6012247129559456
+}

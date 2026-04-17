@@ -1,0 +1,21 @@
+{
+  "device": "cpu",
+  "model_name": "gru",
+  "user_test": 1,
+  "subset_train": -1,
+  "subset_test": -1,
+  "val_ratio": 0.1,
+  "batch_size": 64,
+  "epochs": 20,
+  "lr": 0.001,
+  "seed": 42,
+  "best_epoch": 13,
+  "best_test": {
+    "loss": 3.3169033290039955,
+    "acc": 0.3403233956543709,
+    "macro_f1": 0.27081870780560324,
+    "ece": 0.39727631804051877,
+    "brier": 1.0028620958328247
+  },
+  "aurc": 0.5099300363257776
+}

@@ -1,0 +1,22 @@
+{
+  "device": "cpu",
+  "user_test": 1,
+  "subset_train": 12000,
+  "subset_test": -1,
+  "val_ratio": 0.1,
+  "batch_size": 64,
+  "epochs": 15,
+  "lr": 0.001,
+  "lambda_brier": 0.0,
+  "seed": 42,
+  "best_epoch": 15,
+  "best_test": {
+    "loss": 3.5367596903613507,
+    "ce": 3.5367596903613507,
+    "brier_reg": 1.0734071841198969,
+    "acc": 0.2733703890853967,
+    "macro_f1": 0.1913933686206965,
+    "ece": 0.4183367982152859,
+    "brier": 1.0734072923660278
+  }
+}
