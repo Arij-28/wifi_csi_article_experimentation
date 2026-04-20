@@ -3,6 +3,8 @@
   "user_test": 1,
   "subset_train": -1,
   "subset_test": -1,
+  "val_ratio": 0.1,
+  "batch_size": 64,
   "epochs": 20,
   "lr": 0.001,
   "lambda_proto": 0.0,

@@ -1,0 +1,19 @@
+{
+  "summary_json": "outputs\\bigru_proto_disc_user3_train-1_test-1_la0_001_ls0_0005_m0_2_seed42_summary.json",
+  "checkpoint": "outputs\\bigru_proto_disc_user3_train-1_test-1_la0_001_ls0_0005_m0_2_seed42_best.pt",
+  "temperature": 1.3254287242889404,
+  "raw": {
+    "acc": 0.5531690882291008,
+    "macro_f1": 0.25468107586787453,
+    "ece": 0.19438756820991884,
+    "brier": 0.6495230793952942,
+    "aurc": 0.2512664808414188
+  },
+  "temp_scaled": {
+    "acc": 0.5531690882291008,
+    "macro_f1": 0.25468107586787453,
+    "ece": 0.10940728610654862,
+    "brier": 0.612905740737915,
+    "aurc": 0.24594189085114954
+  }
+}

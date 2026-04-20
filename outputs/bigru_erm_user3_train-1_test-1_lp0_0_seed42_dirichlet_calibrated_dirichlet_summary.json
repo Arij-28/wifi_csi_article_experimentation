@@ -1,0 +1,19 @@
+{
+  "summary_json": "outputs\\bigru_erm_user3_train-1_test-1_lp0_0_seed42_summary.json",
+  "checkpoint": "outputs\\bigru_erm_user3_train-1_test-1_lp0_0_seed42_best.pt",
+  "best_val_loss": 0.7769234776496887,
+  "raw": {
+    "acc": 0.5497999578858707,
+    "macro_f1": 0.26012963698638053,
+    "ece": 0.32238548117377774,
+    "brier": 0.7447819113731384,
+    "aurc": 0.25353309362781606
+  },
+  "dirichlet": {
+    "acc": 0.5506422404716782,
+    "macro_f1": 0.2641358307466088,
+    "ece": 0.12908470693400692,
+    "brier": 0.6232827305793762,
+    "aurc": 0.28117053413120013
+  }
+}

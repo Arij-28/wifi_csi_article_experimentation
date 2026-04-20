@@ -50,9 +50,73 @@ class WidarNpyDataset(Dataset):
         return x, y, domain
 
 
-class BiGRUProto(nn.Module):
-    def __init__(self, num_classes: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.2):
+class MixStyle1D(nn.Module):
+    """
+    MixStyle on tensors shaped [B, C, T].
+    Statistics are computed across the last dimension T.
+    """
+    def __init__(self, p: float = 0.5, alpha: float = 0.1, eps: float = 1e-6):
         super().__init__()
+        self.p = p
+        self.alpha = alpha
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor, domains: torch.Tensor | None = None) -> tuple[torch.Tensor, float]:
+        if not self.training or self.p <= 0.0 or np.random.rand() > self.p:
+            return x, 0.0
+
+        b = x.size(0)
+        if b < 2:
+            return x, 0.0
+
+        mu = x.mean(dim=2, keepdim=True)
+        var = x.var(dim=2, keepdim=True, unbiased=False)
+        sig = (var + self.eps).sqrt()
+
+        x_norm = (x - mu) / sig
+
+        device = x.device
+        if domains is None:
+            perm = torch.randperm(b, device=device)
+        else:
+            perm_list = []
+            d = domains.detach().cpu().numpy()
+            for i in range(b):
+                candidates = np.where(d != d[i])[0]
+                if len(candidates) == 0:
+                    j = np.random.randint(0, b)
+                    while j == i and b > 1:
+                        j = np.random.randint(0, b)
+                else:
+                    j = int(np.random.choice(candidates))
+                perm_list.append(j)
+            perm = torch.tensor(perm_list, device=device, dtype=torch.long)
+
+        mu2 = mu[perm]
+        sig2 = sig[perm]
+
+        lam = np.random.beta(self.alpha, self.alpha, size=(b, 1, 1)).astype(np.float32)
+        lam = torch.from_numpy(lam).to(device)
+
+        mu_mix = lam * mu + (1.0 - lam) * mu2
+        sig_mix = lam * sig + (1.0 - lam) * sig2
+
+        x_mix = x_norm * sig_mix + mu_mix
+        return x_mix, 1.0
+
+
+class BiGRUMixStyle(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+        mixstyle_p: float = 0.5,
+        mixstyle_alpha: float = 0.1,
+    ):
+        super().__init__()
+        self.mixstyle = MixStyle1D(p=mixstyle_p, alpha=mixstyle_alpha)
         self.gru = nn.GRU(
             input_size=400,
             hidden_size=hidden_dim,
@@ -62,83 +126,21 @@ class BiGRUProto(nn.Module):
         )
         self.fc = nn.Linear(hidden_dim * 2, num_classes)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, domains: torch.Tensor | None = None, apply_mixstyle: bool = False):
         # x: [B, 22, 400]
+        mixed_ratio = 0.0
+        if apply_mixstyle:
+            x, mixed_ratio = self.mixstyle(x, domains)
+
         x = x.view(-1, 22, 400)
         x = x.permute(1, 0, 2)  # [22, B, 400]
+
         _, ht = self.gru(x)
         feat_fwd = ht[-2]
         feat_bwd = ht[-1]
         feat = torch.cat([feat_fwd, feat_bwd], dim=1)
         logits = self.fc(feat)
-        return logits, feat
-
-
-def prototype_discriminative_losses(
-    embeddings: torch.Tensor,
-    labels: torch.Tensor,
-    domains: torch.Tensor,
-    sep_margin: float = 0.2,
-    eps: float = 1e-8,
-):
-    """
-    align_loss:
-        align same-class prototypes across domains/users
-    sep_loss:
-        separate different-class global prototypes
-    """
-
-    device = embeddings.device
-    unique_labels = torch.unique(labels)
-
-    global_protos = []
-    align_terms = []
-
-    for cls in unique_labels:
-        cls_mask = labels == cls
-        cls_domains = torch.unique(domains[cls_mask])
-
-        local_protos = []
-        for dom in cls_domains:
-            mask = cls_mask & (domains == dom)
-            if mask.sum() > 0:
-                proto = embeddings[mask].mean(dim=0)
-                proto = proto / (proto.norm(p=2) + eps)
-                local_protos.append(proto)
-
-        if len(local_protos) == 0:
-            continue
-
-        local_protos = torch.stack(local_protos, dim=0)   # [n_dom, d]
-        global_proto = local_protos.mean(dim=0)
-        global_proto = global_proto / (global_proto.norm(p=2) + eps)
-
-        global_protos.append(global_proto)
-
-        # cosine alignment: 1 - cos(local_proto, global_proto)
-        cos_sim = torch.matmul(local_protos, global_proto.unsqueeze(1)).squeeze(1)
-        align_loss_cls = (1.0 - cos_sim).mean()
-        align_terms.append(align_loss_cls)
-
-    if len(align_terms) > 0:
-        align_loss = torch.stack(align_terms).mean()
-    else:
-        align_loss = torch.tensor(0.0, device=device)
-
-    if len(global_protos) < 2:
-        sep_loss = torch.tensor(0.0, device=device)
-    else:
-        global_protos = torch.stack(global_protos, dim=0)   # [K_present, d]
-        sim_matrix = torch.matmul(global_protos, global_protos.T)  # cosine similarity
-
-        n = sim_matrix.size(0)
-        triu_mask = torch.triu(torch.ones(n, n, device=device), diagonal=1).bool()
-        pair_sims = sim_matrix[triu_mask]
-
-        # push inter-class similarities below sep_margin
-        sep_loss = torch.relu(pair_sims - sep_margin).mean()
-
-    return align_loss, sep_loss
+        return logits, feat, mixed_ratio
 
 
 def compute_ece(probs: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
@@ -177,9 +179,7 @@ def run_epoch(
     loader,
     device,
     optimizer=None,
-    lambda_align: float = 0.0,
-    lambda_sep: float = 0.0,
-    sep_margin: float = 0.2,
+    apply_mixstyle: bool = False,
 ):
     criterion = nn.CrossEntropyLoss()
     is_train = optimizer is not None
@@ -187,9 +187,9 @@ def run_epoch(
 
     total_loss = 0.0
     total_ce = 0.0
-    total_align = 0.0
-    total_sep = 0.0
     total_n = 0
+    total_mixed_batches = 0.0
+    num_batches = 0
     all_logits = []
     all_targets = []
 
@@ -198,17 +198,14 @@ def run_epoch(
         y = y.to(device)
         domain = domain.to(device)
 
-        logits, feat = model(x)
-        ce = criterion(logits, y)
-
-        align_loss, sep_loss = prototype_discriminative_losses(
-            embeddings=feat,
-            labels=y,
+        logits, _, mixed_flag = model(
+            x,
             domains=domain,
-            sep_margin=sep_margin,
+            apply_mixstyle=(is_train and apply_mixstyle),
         )
 
-        loss = ce + lambda_align * align_loss + lambda_sep * sep_loss
+        ce = criterion(logits, y)
+        loss = ce
 
         if is_train:
             optimizer.zero_grad()
@@ -218,9 +215,9 @@ def run_epoch(
         bs = x.size(0)
         total_loss += loss.item() * bs
         total_ce += ce.item() * bs
-        total_align += align_loss.item() * bs
-        total_sep += sep_loss.item() * bs
         total_n += bs
+        total_mixed_batches += mixed_flag
+        num_batches += 1
 
         all_logits.append(logits.detach().cpu())
         all_targets.append(y.detach().cpu())
@@ -235,8 +232,7 @@ def run_epoch(
     return {
         "loss": total_loss / total_n,
         "ce": total_ce / total_n,
-        "proto_align": total_align / total_n,
-        "proto_sep": total_sep / total_n,
+        "mixed_batch_ratio": float(total_mixed_batches / max(1, num_batches)) if is_train else 0.0,
         "acc": float((preds == targets).mean()),
         "macro_f1": float(f1_score(targets, preds, average="macro")),
         "ece": compute_ece(probs, targets),
@@ -252,7 +248,7 @@ def collect_outputs(model, loader, device):
 
     for x, y, _ in loader:
         x = x.to(device)
-        logits, _ = model(x)
+        logits, _, _ = model(x, domains=None, apply_mixstyle=False)
         all_logits.append(logits.cpu())
         all_targets.append(y.cpu())
 
@@ -329,15 +325,14 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--lambda_align", type=float, default=0.001)
-    parser.add_argument("--lambda_sep", type=float, default=0.0005)
-    parser.add_argument("--sep_margin", type=float, default=0.2)
+    parser.add_argument("--mixstyle_p", type=float, default=0.5)
+    parser.add_argument("--mixstyle_alpha", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--tag", type=str, default="bigru_proto_disc")
+    parser.add_argument("--tag", type=str, default="bigru_mixstyle")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -375,11 +370,13 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    model = BiGRUProto(
+    model = BiGRUMixStyle(
         num_classes=len(label_to_index),
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         dropout=args.dropout,
+        mixstyle_p=args.mixstyle_p,
+        mixstyle_alpha=args.mixstyle_alpha,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -390,9 +387,8 @@ def main():
     print(f"val size   = {len(val_ds)}")
     print(f"test size  = {len(test_ds)}")
     print(f"num classes = {len(label_to_index)}")
-    print(f"lambda_align = {args.lambda_align}")
-    print(f"lambda_sep = {args.lambda_sep}")
-    print(f"sep_margin = {args.sep_margin}")
+    print(f"mixstyle_p = {args.mixstyle_p}")
+    print(f"mixstyle_alpha = {args.mixstyle_alpha}")
     print(f"batch_size = {args.batch_size}")
 
     history = []
@@ -406,9 +402,7 @@ def main():
             train_loader,
             device,
             optimizer=optimizer,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            apply_mixstyle=True,
         )
 
         val_metrics = run_epoch(
@@ -416,9 +410,7 @@ def main():
             val_loader,
             device,
             optimizer=None,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            apply_mixstyle=False,
         )
 
         test_metrics = run_epoch(
@@ -426,9 +418,7 @@ def main():
             test_loader,
             device,
             optimizer=None,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            apply_mixstyle=False,
         )
 
         history.append({
@@ -436,6 +426,7 @@ def main():
             "train_loss": train_metrics["loss"],
             "train_acc": train_metrics["acc"],
             "train_macro_f1": train_metrics["macro_f1"],
+            "train_mixed_batch_ratio": train_metrics["mixed_batch_ratio"],
             "val_loss": val_metrics["loss"],
             "val_acc": val_metrics["acc"],
             "val_macro_f1": val_metrics["macro_f1"],
@@ -453,6 +444,7 @@ def main():
 
         print(
             f"Epoch {epoch:02d} | "
+            f"mixed_batch={train_metrics['mixed_batch_ratio']:.3f} | "
             f"train_acc={train_metrics['acc']:.4f} train_f1={train_metrics['macro_f1']:.4f} | "
             f"val_acc={val_metrics['acc']:.4f} val_f1={val_metrics['macro_f1']:.4f} | "
             f"test_acc={test_metrics['acc']:.4f} test_f1={test_metrics['macro_f1']:.4f} "
@@ -465,9 +457,7 @@ def main():
         test_loader,
         device,
         optimizer=None,
-        lambda_align=args.lambda_align,
-        lambda_sep=args.lambda_sep,
-        sep_margin=args.sep_margin,
+        apply_mixstyle=False,
     )
 
     print("\nBest model selected on val_macro_f1")
@@ -491,9 +481,8 @@ def main():
         f"_user{args.user_test}"
         f"_train{args.subset_train}"
         f"_test{args.subset_test}"
-        f"_la{str(args.lambda_align).replace('.', '_')}"
-        f"_ls{str(args.lambda_sep).replace('.', '_')}"
-        f"_m{str(args.sep_margin).replace('.', '_')}"
+        f"_p{str(args.mixstyle_p).replace('.', '_')}"
+        f"_a{str(args.mixstyle_alpha).replace('.', '_')}"
         f"_seed{args.seed}"
     )
 
@@ -509,9 +498,8 @@ def main():
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "lr": args.lr,
-        "lambda_align": args.lambda_align,
-        "lambda_sep": args.lambda_sep,
-        "sep_margin": args.sep_margin,
+        "mixstyle_p": args.mixstyle_p,
+        "mixstyle_alpha": args.mixstyle_alpha,
         "seed": args.seed,
         "best_epoch": best_epoch,
         "best_test": best_test,

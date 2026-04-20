@@ -1,0 +1,19 @@
+{
+  "summary_json": "outputs\\bigru_mixup_user5_train-1_test-1_ma0_4_mp0_5_seed42_summary.json",
+  "checkpoint": "outputs\\bigru_mixup_user5_train-1_test-1_ma0_4_mp0_5_seed42_best.pt",
+  "temperature": 1.6220264434814453,
+  "raw": {
+    "acc": 0.76,
+    "macro_f1": 0.3310437125385318,
+    "ece": 0.08489544820785522,
+    "brier": 0.35216450691223145,
+    "aurc": 0.08070350541008843
+  },
+  "temp_scaled": {
+    "acc": 0.76,
+    "macro_f1": 0.3310437125385318,
+    "ece": 0.03611455278926425,
+    "brier": 0.34182798862457275,
+    "aurc": 0.08020085509618123
+  }
+}

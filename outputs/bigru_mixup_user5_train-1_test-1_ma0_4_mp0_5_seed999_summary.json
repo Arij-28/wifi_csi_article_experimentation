@@ -1,0 +1,24 @@
+{
+  "device": "cpu",
+  "user_test": 5,
+  "subset_train": -1,
+  "subset_test": -1,
+  "val_ratio": 0.1,
+  "batch_size": 64,
+  "epochs": 20,
+  "lr": 0.001,
+  "mixup_alpha": 0.4,
+  "mixup_prob": 0.5,
+  "seed": 999,
+  "best_epoch": 6,
+  "best_test": {
+    "loss": 0.808150404188368,
+    "ce": 0.808150404188368,
+    "mixed_ratio": 0.0,
+    "acc": 0.7448888888888889,
+    "macro_f1": 0.32627200068096396,
+    "ece": 0.060148505356576704,
+    "brier": 0.36464789509773254
+  },
+  "aurc": 0.08528946426179673
+}

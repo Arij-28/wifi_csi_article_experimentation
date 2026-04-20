@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
@@ -50,8 +51,15 @@ class WidarNpyDataset(Dataset):
         return x, y, domain
 
 
-class BiGRUProto(nn.Module):
-    def __init__(self, num_classes: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.2):
+class BiGRUSupCon(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+        proj_dim: int = 64,
+    ):
         super().__init__()
         self.gru = nn.GRU(
             input_size=400,
@@ -60,85 +68,81 @@ class BiGRUProto(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
             bidirectional=True,
         )
-        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+        feat_dim = hidden_dim * 2
+        self.fc = nn.Linear(feat_dim, num_classes)
+
+        self.proj = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(feat_dim, proj_dim),
+        )
 
     def forward(self, x):
         # x: [B, 22, 400]
         x = x.view(-1, 22, 400)
         x = x.permute(1, 0, 2)  # [22, B, 400]
+
         _, ht = self.gru(x)
         feat_fwd = ht[-2]
         feat_bwd = ht[-1]
         feat = torch.cat([feat_fwd, feat_bwd], dim=1)
+
         logits = self.fc(feat)
-        return logits, feat
+        proj = self.proj(feat)
+        proj = F.normalize(proj, dim=1)
+
+        return logits, feat, proj
 
 
-def prototype_discriminative_losses(
-    embeddings: torch.Tensor,
+def supervised_contrastive_cross_user_loss(
+    z: torch.Tensor,
     labels: torch.Tensor,
     domains: torch.Tensor,
-    sep_margin: float = 0.2,
-    eps: float = 1e-8,
-):
+    temperature: float = 0.1,
+    cross_user_weight: float = 2.0,
+    eps: float = 1e-12,
+) -> torch.Tensor:
     """
-    align_loss:
-        align same-class prototypes across domains/users
-    sep_loss:
-        separate different-class global prototypes
+    Supervised contrastive loss on a single view per sample.
+    Positives = same class.
+    Cross-user positives receive larger weight.
     """
 
-    device = embeddings.device
-    unique_labels = torch.unique(labels)
+    device = z.device
+    batch_size = z.size(0)
 
-    global_protos = []
-    align_terms = []
+    if batch_size < 2:
+        return torch.tensor(0.0, device=device)
 
-    for cls in unique_labels:
-        cls_mask = labels == cls
-        cls_domains = torch.unique(domains[cls_mask])
+    labels = labels.contiguous().view(-1, 1)
+    domains = domains.contiguous().view(-1, 1)
 
-        local_protos = []
-        for dom in cls_domains:
-            mask = cls_mask & (domains == dom)
-            if mask.sum() > 0:
-                proto = embeddings[mask].mean(dim=0)
-                proto = proto / (proto.norm(p=2) + eps)
-                local_protos.append(proto)
+    same_label = torch.eq(labels, labels.T).float().to(device)
+    same_domain = torch.eq(domains, domains.T).float().to(device)
 
-        if len(local_protos) == 0:
-            continue
+    eye = torch.eye(batch_size, device=device)
+    non_self = 1.0 - eye
 
-        local_protos = torch.stack(local_protos, dim=0)   # [n_dom, d]
-        global_proto = local_protos.mean(dim=0)
-        global_proto = global_proto / (global_proto.norm(p=2) + eps)
+    pos_mask = same_label * non_self
 
-        global_protos.append(global_proto)
+    # Weight positives more when they come from different users.
+    pos_weights = pos_mask * (same_domain + (1.0 - same_domain) * cross_user_weight)
 
-        # cosine alignment: 1 - cos(local_proto, global_proto)
-        cos_sim = torch.matmul(local_protos, global_proto.unsqueeze(1)).squeeze(1)
-        align_loss_cls = (1.0 - cos_sim).mean()
-        align_terms.append(align_loss_cls)
+    logits = torch.matmul(z, z.T) / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
 
-    if len(align_terms) > 0:
-        align_loss = torch.stack(align_terms).mean()
-    else:
-        align_loss = torch.tensor(0.0, device=device)
+    exp_logits = torch.exp(logits) * non_self
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + eps)
 
-    if len(global_protos) < 2:
-        sep_loss = torch.tensor(0.0, device=device)
-    else:
-        global_protos = torch.stack(global_protos, dim=0)   # [K_present, d]
-        sim_matrix = torch.matmul(global_protos, global_protos.T)  # cosine similarity
+    pos_weight_sum = pos_weights.sum(dim=1)
+    valid = pos_weight_sum > 0
 
-        n = sim_matrix.size(0)
-        triu_mask = torch.triu(torch.ones(n, n, device=device), diagonal=1).bool()
-        pair_sims = sim_matrix[triu_mask]
+    if valid.sum() == 0:
+        return torch.tensor(0.0, device=device)
 
-        # push inter-class similarities below sep_margin
-        sep_loss = torch.relu(pair_sims - sep_margin).mean()
-
-    return align_loss, sep_loss
+    mean_log_prob_pos = (pos_weights * log_prob).sum(dim=1) / (pos_weight_sum + eps)
+    loss = -mean_log_prob_pos[valid].mean()
+    return loss
 
 
 def compute_ece(probs: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
@@ -177,9 +181,9 @@ def run_epoch(
     loader,
     device,
     optimizer=None,
-    lambda_align: float = 0.0,
-    lambda_sep: float = 0.0,
-    sep_margin: float = 0.2,
+    lambda_supcon: float = 0.0,
+    supcon_temperature: float = 0.1,
+    cross_user_weight: float = 2.0,
 ):
     criterion = nn.CrossEntropyLoss()
     is_train = optimizer is not None
@@ -187,8 +191,7 @@ def run_epoch(
 
     total_loss = 0.0
     total_ce = 0.0
-    total_align = 0.0
-    total_sep = 0.0
+    total_supcon = 0.0
     total_n = 0
     all_logits = []
     all_targets = []
@@ -198,17 +201,17 @@ def run_epoch(
         y = y.to(device)
         domain = domain.to(device)
 
-        logits, feat = model(x)
+        logits, _, proj = model(x)
         ce = criterion(logits, y)
-
-        align_loss, sep_loss = prototype_discriminative_losses(
-            embeddings=feat,
+        supcon = supervised_contrastive_cross_user_loss(
+            z=proj,
             labels=y,
             domains=domain,
-            sep_margin=sep_margin,
+            temperature=supcon_temperature,
+            cross_user_weight=cross_user_weight,
         )
 
-        loss = ce + lambda_align * align_loss + lambda_sep * sep_loss
+        loss = ce + lambda_supcon * supcon
 
         if is_train:
             optimizer.zero_grad()
@@ -218,8 +221,7 @@ def run_epoch(
         bs = x.size(0)
         total_loss += loss.item() * bs
         total_ce += ce.item() * bs
-        total_align += align_loss.item() * bs
-        total_sep += sep_loss.item() * bs
+        total_supcon += supcon.item() * bs
         total_n += bs
 
         all_logits.append(logits.detach().cpu())
@@ -235,8 +237,7 @@ def run_epoch(
     return {
         "loss": total_loss / total_n,
         "ce": total_ce / total_n,
-        "proto_align": total_align / total_n,
-        "proto_sep": total_sep / total_n,
+        "supcon": total_supcon / total_n,
         "acc": float((preds == targets).mean()),
         "macro_f1": float(f1_score(targets, preds, average="macro")),
         "ece": compute_ece(probs, targets),
@@ -252,7 +253,7 @@ def collect_outputs(model, loader, device):
 
     for x, y, _ in loader:
         x = x.to(device)
-        logits, _ = model(x)
+        logits, _, _ = model(x)
         all_logits.append(logits.cpu())
         all_targets.append(y.cpu())
 
@@ -329,15 +330,16 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--lambda_align", type=float, default=0.001)
-    parser.add_argument("--lambda_sep", type=float, default=0.0005)
-    parser.add_argument("--sep_margin", type=float, default=0.2)
+    parser.add_argument("--lambda_supcon", type=float, default=0.1)
+    parser.add_argument("--supcon_temperature", type=float, default=0.1)
+    parser.add_argument("--cross_user_weight", type=float, default=2.0)
+    parser.add_argument("--proj_dim", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--tag", type=str, default="bigru_proto_disc")
+    parser.add_argument("--tag", type=str, default="bigru_supcon")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -375,11 +377,12 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    model = BiGRUProto(
+    model = BiGRUSupCon(
         num_classes=len(label_to_index),
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         dropout=args.dropout,
+        proj_dim=args.proj_dim,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -390,9 +393,9 @@ def main():
     print(f"val size   = {len(val_ds)}")
     print(f"test size  = {len(test_ds)}")
     print(f"num classes = {len(label_to_index)}")
-    print(f"lambda_align = {args.lambda_align}")
-    print(f"lambda_sep = {args.lambda_sep}")
-    print(f"sep_margin = {args.sep_margin}")
+    print(f"lambda_supcon = {args.lambda_supcon}")
+    print(f"supcon_temperature = {args.supcon_temperature}")
+    print(f"cross_user_weight = {args.cross_user_weight}")
     print(f"batch_size = {args.batch_size}")
 
     history = []
@@ -406,9 +409,9 @@ def main():
             train_loader,
             device,
             optimizer=optimizer,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            lambda_supcon=args.lambda_supcon,
+            supcon_temperature=args.supcon_temperature,
+            cross_user_weight=args.cross_user_weight,
         )
 
         val_metrics = run_epoch(
@@ -416,9 +419,9 @@ def main():
             val_loader,
             device,
             optimizer=None,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            lambda_supcon=args.lambda_supcon,
+            supcon_temperature=args.supcon_temperature,
+            cross_user_weight=args.cross_user_weight,
         )
 
         test_metrics = run_epoch(
@@ -426,9 +429,9 @@ def main():
             test_loader,
             device,
             optimizer=None,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            lambda_supcon=args.lambda_supcon,
+            supcon_temperature=args.supcon_temperature,
+            cross_user_weight=args.cross_user_weight,
         )
 
         history.append({
@@ -465,9 +468,9 @@ def main():
         test_loader,
         device,
         optimizer=None,
-        lambda_align=args.lambda_align,
-        lambda_sep=args.lambda_sep,
-        sep_margin=args.sep_margin,
+        lambda_supcon=args.lambda_supcon,
+        supcon_temperature=args.supcon_temperature,
+        cross_user_weight=args.cross_user_weight,
     )
 
     print("\nBest model selected on val_macro_f1")
@@ -491,9 +494,9 @@ def main():
         f"_user{args.user_test}"
         f"_train{args.subset_train}"
         f"_test{args.subset_test}"
-        f"_la{str(args.lambda_align).replace('.', '_')}"
-        f"_ls{str(args.lambda_sep).replace('.', '_')}"
-        f"_m{str(args.sep_margin).replace('.', '_')}"
+        f"_lsc{str(args.lambda_supcon).replace('.', '_')}"
+        f"_tau{str(args.supcon_temperature).replace('.', '_')}"
+        f"_cw{str(args.cross_user_weight).replace('.', '_')}"
         f"_seed{args.seed}"
     )
 
@@ -509,9 +512,10 @@ def main():
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "lr": args.lr,
-        "lambda_align": args.lambda_align,
-        "lambda_sep": args.lambda_sep,
-        "sep_margin": args.sep_margin,
+        "lambda_supcon": args.lambda_supcon,
+        "supcon_temperature": args.supcon_temperature,
+        "cross_user_weight": args.cross_user_weight,
+        "proj_dim": args.proj_dim,
         "seed": args.seed,
         "best_epoch": best_epoch,
         "best_test": best_test,

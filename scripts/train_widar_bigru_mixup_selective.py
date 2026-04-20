@@ -50,7 +50,7 @@ class WidarNpyDataset(Dataset):
         return x, y, domain
 
 
-class BiGRUProto(nn.Module):
+class BiGRUClassifier(nn.Module):
     def __init__(self, num_classes: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.2):
         super().__init__()
         self.gru = nn.GRU(
@@ -74,71 +74,42 @@ class BiGRUProto(nn.Module):
         return logits, feat
 
 
-def prototype_discriminative_losses(
-    embeddings: torch.Tensor,
-    labels: torch.Tensor,
-    domains: torch.Tensor,
-    sep_margin: float = 0.2,
-    eps: float = 1e-8,
+def same_class_cross_user_mixup(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    domain: torch.Tensor,
+    alpha: float = 0.4,
+    prob: float = 0.5,
 ):
     """
-    align_loss:
-        align same-class prototypes across domains/users
-    sep_loss:
-        separate different-class global prototypes
+    Mix samples only with another sample of the SAME class but a DIFFERENT user/domain.
+    Label stays unchanged because same-class mixup is used.
     """
+    if alpha <= 0.0 or prob <= 0.0:
+        return x, 0
 
-    device = embeddings.device
-    unique_labels = torch.unique(labels)
+    batch_size = x.size(0)
+    y_cpu = y.detach().cpu().numpy()
+    d_cpu = domain.detach().cpu().numpy()
 
-    global_protos = []
-    align_terms = []
+    x_mixed = x.clone()
+    num_mixed = 0
 
-    for cls in unique_labels:
-        cls_mask = labels == cls
-        cls_domains = torch.unique(domains[cls_mask])
-
-        local_protos = []
-        for dom in cls_domains:
-            mask = cls_mask & (domains == dom)
-            if mask.sum() > 0:
-                proto = embeddings[mask].mean(dim=0)
-                proto = proto / (proto.norm(p=2) + eps)
-                local_protos.append(proto)
-
-        if len(local_protos) == 0:
+    for i in range(batch_size):
+        if np.random.rand() > prob:
             continue
 
-        local_protos = torch.stack(local_protos, dim=0)   # [n_dom, d]
-        global_proto = local_protos.mean(dim=0)
-        global_proto = global_proto / (global_proto.norm(p=2) + eps)
+        candidates = np.where((y_cpu == y_cpu[i]) & (d_cpu != d_cpu[i]))[0]
+        if len(candidates) == 0:
+            continue
 
-        global_protos.append(global_proto)
+        j = int(np.random.choice(candidates))
+        lam = float(np.random.beta(alpha, alpha))
 
-        # cosine alignment: 1 - cos(local_proto, global_proto)
-        cos_sim = torch.matmul(local_protos, global_proto.unsqueeze(1)).squeeze(1)
-        align_loss_cls = (1.0 - cos_sim).mean()
-        align_terms.append(align_loss_cls)
+        x_mixed[i] = lam * x[i] + (1.0 - lam) * x[j]
+        num_mixed += 1
 
-    if len(align_terms) > 0:
-        align_loss = torch.stack(align_terms).mean()
-    else:
-        align_loss = torch.tensor(0.0, device=device)
-
-    if len(global_protos) < 2:
-        sep_loss = torch.tensor(0.0, device=device)
-    else:
-        global_protos = torch.stack(global_protos, dim=0)   # [K_present, d]
-        sim_matrix = torch.matmul(global_protos, global_protos.T)  # cosine similarity
-
-        n = sim_matrix.size(0)
-        triu_mask = torch.triu(torch.ones(n, n, device=device), diagonal=1).bool()
-        pair_sims = sim_matrix[triu_mask]
-
-        # push inter-class similarities below sep_margin
-        sep_loss = torch.relu(pair_sims - sep_margin).mean()
-
-    return align_loss, sep_loss
+    return x_mixed, num_mixed
 
 
 def compute_ece(probs: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
@@ -177,9 +148,8 @@ def run_epoch(
     loader,
     device,
     optimizer=None,
-    lambda_align: float = 0.0,
-    lambda_sep: float = 0.0,
-    sep_margin: float = 0.2,
+    mixup_alpha: float = 0.0,
+    mixup_prob: float = 0.0,
 ):
     criterion = nn.CrossEntropyLoss()
     is_train = optimizer is not None
@@ -187,9 +157,8 @@ def run_epoch(
 
     total_loss = 0.0
     total_ce = 0.0
-    total_align = 0.0
-    total_sep = 0.0
     total_n = 0
+    total_mixed = 0
     all_logits = []
     all_targets = []
 
@@ -198,17 +167,21 @@ def run_epoch(
         y = y.to(device)
         domain = domain.to(device)
 
-        logits, feat = model(x)
+        if is_train:
+            x_in, num_mixed = same_class_cross_user_mixup(
+                x=x,
+                y=y,
+                domain=domain,
+                alpha=mixup_alpha,
+                prob=mixup_prob,
+            )
+            total_mixed += num_mixed
+        else:
+            x_in = x
+
+        logits, _ = model(x_in)
         ce = criterion(logits, y)
-
-        align_loss, sep_loss = prototype_discriminative_losses(
-            embeddings=feat,
-            labels=y,
-            domains=domain,
-            sep_margin=sep_margin,
-        )
-
-        loss = ce + lambda_align * align_loss + lambda_sep * sep_loss
+        loss = ce
 
         if is_train:
             optimizer.zero_grad()
@@ -218,8 +191,6 @@ def run_epoch(
         bs = x.size(0)
         total_loss += loss.item() * bs
         total_ce += ce.item() * bs
-        total_align += align_loss.item() * bs
-        total_sep += sep_loss.item() * bs
         total_n += bs
 
         all_logits.append(logits.detach().cpu())
@@ -235,8 +206,7 @@ def run_epoch(
     return {
         "loss": total_loss / total_n,
         "ce": total_ce / total_n,
-        "proto_align": total_align / total_n,
-        "proto_sep": total_sep / total_n,
+        "mixed_ratio": float(total_mixed / total_n) if is_train else 0.0,
         "acc": float((preds == targets).mean()),
         "macro_f1": float(f1_score(targets, preds, average="macro")),
         "ece": compute_ece(probs, targets),
@@ -329,15 +299,14 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--lambda_align", type=float, default=0.001)
-    parser.add_argument("--lambda_sep", type=float, default=0.0005)
-    parser.add_argument("--sep_margin", type=float, default=0.2)
+    parser.add_argument("--mixup_alpha", type=float, default=0.4)
+    parser.add_argument("--mixup_prob", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--tag", type=str, default="bigru_proto_disc")
+    parser.add_argument("--tag", type=str, default="bigru_mixup")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -375,7 +344,7 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    model = BiGRUProto(
+    model = BiGRUClassifier(
         num_classes=len(label_to_index),
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
@@ -390,9 +359,8 @@ def main():
     print(f"val size   = {len(val_ds)}")
     print(f"test size  = {len(test_ds)}")
     print(f"num classes = {len(label_to_index)}")
-    print(f"lambda_align = {args.lambda_align}")
-    print(f"lambda_sep = {args.lambda_sep}")
-    print(f"sep_margin = {args.sep_margin}")
+    print(f"mixup_alpha = {args.mixup_alpha}")
+    print(f"mixup_prob = {args.mixup_prob}")
     print(f"batch_size = {args.batch_size}")
 
     history = []
@@ -406,9 +374,8 @@ def main():
             train_loader,
             device,
             optimizer=optimizer,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            mixup_alpha=args.mixup_alpha,
+            mixup_prob=args.mixup_prob,
         )
 
         val_metrics = run_epoch(
@@ -416,9 +383,8 @@ def main():
             val_loader,
             device,
             optimizer=None,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            mixup_alpha=0.0,
+            mixup_prob=0.0,
         )
 
         test_metrics = run_epoch(
@@ -426,9 +392,8 @@ def main():
             test_loader,
             device,
             optimizer=None,
-            lambda_align=args.lambda_align,
-            lambda_sep=args.lambda_sep,
-            sep_margin=args.sep_margin,
+            mixup_alpha=0.0,
+            mixup_prob=0.0,
         )
 
         history.append({
@@ -436,6 +401,7 @@ def main():
             "train_loss": train_metrics["loss"],
             "train_acc": train_metrics["acc"],
             "train_macro_f1": train_metrics["macro_f1"],
+            "train_mixed_ratio": train_metrics["mixed_ratio"],
             "val_loss": val_metrics["loss"],
             "val_acc": val_metrics["acc"],
             "val_macro_f1": val_metrics["macro_f1"],
@@ -453,6 +419,7 @@ def main():
 
         print(
             f"Epoch {epoch:02d} | "
+            f"mixed={train_metrics['mixed_ratio']:.3f} | "
             f"train_acc={train_metrics['acc']:.4f} train_f1={train_metrics['macro_f1']:.4f} | "
             f"val_acc={val_metrics['acc']:.4f} val_f1={val_metrics['macro_f1']:.4f} | "
             f"test_acc={test_metrics['acc']:.4f} test_f1={test_metrics['macro_f1']:.4f} "
@@ -465,9 +432,8 @@ def main():
         test_loader,
         device,
         optimizer=None,
-        lambda_align=args.lambda_align,
-        lambda_sep=args.lambda_sep,
-        sep_margin=args.sep_margin,
+        mixup_alpha=0.0,
+        mixup_prob=0.0,
     )
 
     print("\nBest model selected on val_macro_f1")
@@ -491,9 +457,8 @@ def main():
         f"_user{args.user_test}"
         f"_train{args.subset_train}"
         f"_test{args.subset_test}"
-        f"_la{str(args.lambda_align).replace('.', '_')}"
-        f"_ls{str(args.lambda_sep).replace('.', '_')}"
-        f"_m{str(args.sep_margin).replace('.', '_')}"
+        f"_ma{str(args.mixup_alpha).replace('.', '_')}"
+        f"_mp{str(args.mixup_prob).replace('.', '_')}"
         f"_seed{args.seed}"
     )
 
@@ -509,9 +474,8 @@ def main():
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "lr": args.lr,
-        "lambda_align": args.lambda_align,
-        "lambda_sep": args.lambda_sep,
-        "sep_margin": args.sep_margin,
+        "mixup_alpha": args.mixup_alpha,
+        "mixup_prob": args.mixup_prob,
         "seed": args.seed,
         "best_epoch": best_epoch,
         "best_test": best_test,
