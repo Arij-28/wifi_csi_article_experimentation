@@ -32,7 +32,7 @@ Le code prend en charge :
 
 ## Format attendu des données
 
-### Option recommandée
+
 Chaque dataset doit fournir un `metadata.csv` avec au minimum les colonnes suivantes :
 
 - `sample_path` : chemin vers le fichier `.npy` ou `.npz`
