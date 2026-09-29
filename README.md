@@ -1,171 +1,52 @@
-# Wi-Fi CSI HAR — Experimental Codebase
+# Reliable Cross-User Wi-Fi CSI Recognition
 
-Code Python pour la partie **expérimentation** de l'article :
+This repository contains the experimental code and analysis for the paper:
 
-**Prototype-Consistent and Reliability-Calibrated Domain Generalization for Wi-Fi CSI Human Activity Recognition**
+**Reliable Cross-User Wi-Fi CSI Recognition: BiGRU Baselines, Same-Class Mixup, and Reliability-Aware Evaluation**
 
-## Ce que contient le projet
+The project studies raw Wi-Fi Channel State Information (CSI) for human activity recognition under strict cross-user shift. The goal is to evaluate not only classification performance, but also prediction reliability through calibration and selective prediction metrics.
 
-- `configs/` : fichiers YAML pour NTU-Fi, Widar 3.0 et un format générique
-- `scripts/train.py` : entraînement
-- `scripts/eval.py` : évaluation d'un checkpoint
-- `scripts/make_splits.py` : génération des splits expérimentaux
-- `scripts/inspect_dataset.py` : inspection rapide des métadonnées
-- `src/wificsi_exp/` : code source principal
-- `tests/` : tests simples
+---
 
-## Contributions implémentées
+## Overview
 
-Le code prend en charge :
+Wi-Fi CSI enables contactless and privacy-preserving human activity recognition. However, CSI-based models trained on a set of source users may degrade when evaluated on unseen users because CSI patterns depend on user identity, motion style, body shape, orientation, and multipath conditions.
 
-1. **ERM** (baseline)
-2. **Prototype consistency**
-3. **Supervised contrastive learning**
-4. **Calibration-aware learning (Brier)**
-5. **Selective prediction / rejection** à l'inférence
+This repository investigates this problem on Widar 3.0 using a strict leave-one-user-out protocol.
 
-## Compatibilité
+The study focuses on:
 
-- Compatible **Windows**
-- Utilise `pathlib`
-- Gère des structures de datasets différentes via des **adapters** et un fichier `metadata.csv`
+1. **Temporal backbone strength**  
+   Comparing GRU and BiGRU encoders for raw CSI recognition.
 
-## Format attendu des données
+2. **Same-class cross-user Mixup**  
+   Mixing samples from different source users only when they belong to the same activity class.
 
+3. **Reliability-aware evaluation**  
+   Reporting calibration and selective-prediction metrics in addition to Accuracy and Macro-F1.
 
-Chaque dataset doit fournir un `metadata.csv` avec au minimum les colonnes suivantes :
+---
 
-- `sample_path` : chemin vers le fichier `.npy` ou `.npz`
-- `label` : nom ou id de l'activité
-- `domain` : domaine principal pour le protocole DG
+## Main Findings
 
-Colonnes optionnelles :
+The main empirical findings are:
 
-- `subject`
-- `environment`
-- `orientation`
-- `split`
+- Replacing a GRU with a BiGRU substantially improves cross-user recognition on a representative held-out-user split.
+- Same-class cross-user Mixup has a user-dependent effect.
+- Mixup improves calibration-related metrics on average, especially ECE and Brier score.
+- ERM remains slightly stronger in aggregate Accuracy, Macro-F1, and AURC.
+- Cross-user raw-CSI recognition is heterogeneous across held-out users.
+- Accuracy alone is insufficient to characterize model behavior under unseen-user shift.
 
-Le tenseur CSI attendu par défaut est de forme :
+The main interpretation is that same-class cross-user Mixup should be viewed as a calibration-oriented regularizer with user-dependent effects, not as a universally superior classifier.
 
-- `(C, S, T)`
+---
 
-avec par exemple :
-- `C = 3`
-- `S = 114`
-- `T = 500`
+## Dataset
 
-### Si les structures diffèrent selon les datasets
-Le projet utilise des **adapters** :
-- `GenericMetadataDataset`
-- `NTUFiDataset`
-- `Widar3Dataset`
+Experiments are conducted on **Widar 3.0**, a Wi-Fi CSI gesture recognition dataset designed around cross-domain variability.
 
-Si ton dataset a une structure spéciale, adapte surtout :
-
-- `src/wificsi_exp/data/adapters.py`
-
-## Installation
-
-### 1. Créer l'environnement
-
-Sous Windows PowerShell :
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install -e .
-```
-
-Sous CMD :
-
-```cmd
-python -m venv .venv
-.\.venv\Scripts\activate.bat
-pip install -r requirements.txt
-pip install -e .
-```
-
-## Commandes utiles
-
-### Inspecter un dataset
-
-```powershell
-python scripts\inspect_dataset.py --config configs\ntu_fi.yaml
-```
-
-### Générer des splits
-
-```powershell
-python scripts\make_splits.py --config configs\widar3.yaml --protocol leave-one-domain-out
-```
-
-### Entraîner
-
-```powershell
-python scripts\train.py --config configs\widar3.yaml --run_name proto_dg_exp
-```
-
-### Évaluer
-
-```powershell
-python scripts\eval.py --config configs\widar3.yaml --checkpoint runs\proto_dg_exp\best.pt
-```
-
-## Baselines supportées
-
-Dans le fichier de config :
-
-- `erm`
-- `proto`
-- `supcon`
-- `brier`
-- `proto_supcon_brier`
-
-La selective prediction est contrôlée séparément à l'évaluation.
-
-## Métriques produites
-
-- Accuracy
-- Macro-F1
-- ECE
-- Brier Score
-- Coverage
-- Selective Accuracy
-- Risk-Coverage table
-
-## Organisation conseillée des expériences
-
-1. NTU-Fi en in-domain
-2. Widar 3.0 en leave-one-domain-out
-3. Ablations :
-   - ERM
-   - ERM + Proto
-   - ERM + SupCon
-   - ERM + Brier
-   - Full model
-4. Évaluation selective prediction
-
-## Remarques importantes
-
-- Les seuils de rejet `tau_conf` et `tau_dist` doivent être choisis sur validation uniquement.
-- Le domaine de test ne doit jamais servir à régler les hyperparamètres.
-- Il est recommandé de faire plusieurs seeds.
-
-## Structure du projet
+Each processed sample is represented as a normalized CSI tensor:
 
 ```text
-wifi_csi_article_experimentation/
-├── configs/
-├── scripts/
-├── src/wificsi_exp/
-│   ├── data/
-│   ├── engine/
-│   ├── losses/
-│   ├── metrics/
-│   ├── models/
-│   └── utils/
-├── tests/
-└── README.md
-```
+22 × 400
